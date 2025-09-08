@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Monopoly Deal Test Client</title>
+    <style>
+      body { font-family: system-ui, Arial, sans-serif; max-width: 800px; margin: 24px auto; }
+      button { margin-right: 8px; margin-bottom: 8px; }
+      h1, h2 { margin: 12px 0 6px; }
+      ul { padding-left: 18px; }
+      .you { color: #555; }
+      .turn { font-weight: 700; color: green; }
+      .panel { border: 1px solid #ddd; padding: 12px; border-radius: 8px; margin-bottom: 12px; }
+      .row { display: flex; gap: 16px; }
+      .col { flex: 1; }
+      .card-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+      pre { background: #f7f7f7; padding: 10px; border-radius: 6px; max-height: 240px; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Monopoly Deal – Test Client</h1>
+
+    <div class="panel">
+      <label for="portInput">Server Port:</label>
+      <input id="portInput" placeholder="8080" />
+      <button onclick="connect()">Connect</button>
+      <hr />
+      <button onclick="joinGame()">Join Game</button>
+      <button onclick="drawCard()">Draw Card</button>
+      <button onclick="resetGame()">Reset Game</button>
+    </div>
+
+    <div class="row">
+      <div class="col panel">
+        <h2>Players</h2>
+        <ul id="players"></ul>
+      </div>
+
+      <div class="col panel">
+        <h2>Your Hand</h2>
+        <div id="hand"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Banks</h2>
+      <div id="banks"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Discard Pile</h2>
+      <div id="discard"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Game Log</h2>
+      <pre id="log"></pre>
+    </div>
+
+    <script>
+
+      let ws;  // must be let so it can be reassigned later
+      let playerId = "Player" + Math.floor(Math.random() * 1000);
+      let hand = [];
+      let players = [];
+      let currentTurn = null;
+      let banks = {};
+      let discard = [];
+    
+      function connect() {
+        const port = document.getElementById("portInput").value || 8080;
+
+        ws = new WebSocket(`ws://localhost:${port}`);
+
+        ws.onopen = () => log(`✅ Connected to server on port ${port}`);
+        ws.onclose = () => log("❌ Connection closed");
+        ws.onerror = (e) => log("⚠️ WebSocket error: " + e?.message);
+
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            console.log("Received:", msg);
+
+            if (msg.type === "system") {
+            if (msg.text) log(msg.text);
+            if (Array.isArray(msg.players)) {
+                players = msg.players;
+                renderPlayers();
+            }
+            }
+            if (msg.type === "error") log("❌ " + msg.text);
+            if (msg.type === "cardDrawn") {
+                const latency = performance.now() - lastActionTime;
+                log(`You drew ${prettyCard(msg.card)} (Latency: ${latency.toFixed(2)} ms)`);
+                }
+            if (msg.type === "handUpdate") {
+            console.log("Updated hand from server:", msg.hand);
+            hand = msg.hand;
+            renderHand();
+            }
+            if (msg.type === "play") {
+            log(`${msg.playerId} played ${prettyCard(msg.card)}`);
+            discard.push(msg.card);
+            renderDiscard();
+            }
+            if (msg.type === "banked") {
+            log(`${msg.playerId} banked ${prettyCard(msg.card)}`);
+            banks[msg.playerId] = msg.bank;
+            renderBanks();
+            }
+            if (msg.type === "turn") {
+            currentTurn = msg.playerId;
+            renderPlayers();
+            log(`It is now ${msg.playerId}'s turn`);
+            }
+        };
+        }
+
+
+
+      function ensureConnected() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            alert("Not connected! Enter a port and press Connect first.");
+            throw new Error("Not connected");
+        }
+        }
+
+      function joinGame() {
+        ensureConnected();
+        playerId = "Player" + Math.floor(Math.random() * 1000);
+        safeSend({ type: "joinGame", playerId });
+        log(`Joining game as ${playerId}`);
+      }
+
+      let lastActionTime = null;
+
+        function drawCard() {
+            ensureConnected();
+            lastActionTime = performance.now(); // record send time
+            safeSend({ type: "drawCard", playerId });
+            }
+
+      function playCard(index) {
+        ensureConnected();
+        if (!ensureJoined()) return;
+        safeSend({ type: "playCard", playerId, cardIndex: index });
+      }
+
+      function bankCard(index) {
+        ensureConnected();
+        if (!ensureJoined()) return;
+        safeSend({ type: "bankCard", playerId, cardIndex: index });
+      }
+
+      function resetGame() {
+        safeSend({ type: "resetGame" });
+      }
+
+      // --- Rendering helpers ---
+      function renderHand() {
+        const handList = document.getElementById("hand");
+        handList.innerHTML = "";
+
+        hand.forEach((card, idx) => {
+          const row = document.createElement("div");
+          row.className = "card-row";
+
+          const span = document.createElement("span");
+          span.textContent = `${idx}: ${prettyCard(card)}`;
+
+          const playBtn = document.createElement("button");
+          playBtn.textContent = "Play";
+          playBtn.onclick = () => playCard(idx);
+
+          const bankBtn = document.createElement("button");
+          bankBtn.textContent = "Bank";
+          bankBtn.onclick = () => bankCard(idx);
+
+          row.appendChild(span);
+          row.appendChild(playBtn);
+          row.appendChild(bankBtn);
+
+          handList.appendChild(row);
+        });
+      }
+      async function latencyTestDraws(numDraws = 20, delay = 200) {
+        let totalLatency = 0;
+        let count = 0;
+
+        for (let i = 0; i < numDraws; i++) {
+            lastActionTime = performance.now();
+            safeSend({ type: "drawCard", playerId });
+
+            // wait until we receive a response
+            await new Promise((resolve) => {
+            const handler = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === "cardDrawn") {
+                const latency = performance.now() - lastActionTime;
+                totalLatency += latency;
+                count++;
+                log(`[Test] Draw ${i + 1}: ${latency.toFixed(2)} ms`);
+
+                ws.removeEventListener("message", handler);
+                resolve();
+                }
+            };
+            ws.addEventListener("message", handler);
+            });
+
+            await new Promise((r) => setTimeout(r, delay)); // short pause between draws
+        }
+
+        const avg = totalLatency / count;
+        log(`✅ Latency test complete: Average = ${avg.toFixed(2)} ms over ${count} draws`);
+        }
+
+      function renderBanks() {
+        const wrap = document.getElementById("banks");
+        wrap.innerHTML = "";
+        Object.entries(banks).forEach(([pid, cards]) => {
+          const div = document.createElement("div");
+          div.innerHTML = `<strong>${pid}${pid === playerId ? " (You)" : ""}</strong>: ${
+            cards.length ? cards.map(c => prettyCard(c)).join(", ") : "Empty"
+          }`;
+          wrap.appendChild(div);
+        });
+      }
+
+      function renderDiscard() {
+        const wrap = document.getElementById("discard");
+        wrap.innerHTML = "";
+        discard.slice(-12).forEach((card, idx) => {
+          const div = document.createElement("div");
+          div.className = "card-row";
+          div.textContent = `${idx}: ${prettyCard(card)}`;
+          wrap.appendChild(div);
+        });
+      }
+
+      function renderPlayers() {
+        const playersList = document.getElementById("players");
+        playersList.innerHTML = "";
+        players.forEach((p) => {
+          const li = document.createElement("li");
+          let label = p;
+          if (p === playerId) label += " (You)";
+          if (p === currentTurn) {
+            li.classList.add("turn");
+            label += " ← current turn";
+          }
+          if (p === playerId) li.classList.add("you");
+          li.textContent = label;
+          playersList.appendChild(li);
+        });
+      }
+
+      function prettyCard(card) {
+        if (!card) return "Unknown Card";
+        if (card.name) return card.name;
+        if (card.type === "money") return `Money ${card.value || ""}`;
+        if (card.type && card.value) return `${card.type} ${card.value}`;
+        if (card.type) return card.type;
+        return JSON.stringify(card);
+      }
+
+      // --- Utilities ---
+      function ensureJoined() {
+        if (!playerId) {
+          alert("Join game first!");
+          return false;
+        }
+        return true;
+      }
+
+      function safeSend(msg) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(msg));
+        } else {
+          console.error("WebSocket not open, cannot send:", msg);
+        }
+      }
+
+      function log(message) {
+        const pre = document.getElementById("log");
+        pre.textContent += message + "\n";
+        pre.scrollTop = pre.scrollHeight;
+      }
+    </script>
+  </body>
+</html>
